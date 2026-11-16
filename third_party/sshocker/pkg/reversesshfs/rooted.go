@@ -34,6 +34,7 @@ type rootedHandlers struct {
 	foldedNames   []string // readonlyNames as FoldName gives them
 	guardRoot     string   // the served directory as Guard is told
 	rootedSys
+	readTransform ReadTransform
 
 	mu    sync.Mutex // protects relay
 	relay *relay
@@ -172,7 +173,7 @@ func (h *rootedHandlers) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return f, nil
+	return h.filterRead(rel, f)
 }
 
 // openRead opens rel for reading, if it is a regular file or a directory.
@@ -238,6 +239,19 @@ func (h *rootedHandlers) OpenFile(r *sftp.Request) (sftp.WriterAtReaderAt, error
 	if err != nil {
 		return nil, err
 	}
+	if h.readTransform == nil {
+		return f, nil
+	}
+	if fi, err := f.Stat(); err == nil && fi.Size() == 0 && (r.Pflags().Trunc || r.Pflags().Creat) {
+		return f, nil
+	}
+	view, err := h.filterRead(r.Filepath, f.File)
+	if err != nil {
+		return nil, err
+	}
+	if filtered, ok := view.(*filteredRead); ok {
+		return &filteredWritable{filteredRead: filtered, appends: f.appends}, nil
+	}
 	return f, nil
 }
 
@@ -260,9 +274,32 @@ func openMode(r *sftp.Request) (uint32, bool) {
 func (h *rootedHandlers) Filecmd(r *sftp.Request) error {
 	switch r.Method {
 	case "Setstat":
+		if f, ok := r.HandleFile().(*filteredWritable); ok {
+			return f.setstat(h, r)
+		}
+		if _, ok := r.HandleFile().(*filteredRead); ok {
+			// Do not redirect handle operations onto a replacement path.
+			return sftp.ErrSSHFxOpUnsupported
+		}
 		// FSETSTAT: r.Filepath is where the file was opened, which may now be another file.
 		if f, ok := r.HandleFile().(writableFile); ok {
 			return h.fsetstat(f.File, r)
+		}
+		if h.readTransform != nil && r.HandleFile() == nil && r.AttrFlags().Size && r.Attributes().Size != 0 {
+			// A path-based truncate uses the same byte offsets as a cleaned
+			// read, rather than chopping the tail off the original media.
+			open := sftp.NewRequest("Open", r.Filepath)
+			open.Flags = 3 // SSH_FXF_READ | SSH_FXF_WRITE
+			view, err := h.OpenFile(open)
+			if err != nil {
+				return err
+			}
+			if f, ok := view.(*filteredWritable); ok {
+				err := f.setstat(h, r)
+				return errors.Join(err, f.Close())
+			}
+			f := view.(writableFile)
+			return errors.Join(h.fsetstat(f.File, r), f.Close())
 		}
 		// A read handle keeps the path checks, but only for the file it is open on.
 		if f, ok := r.HandleFile().(*os.File); ok && !h.isOpenAt(f, r.Filepath) {
@@ -355,17 +392,11 @@ func (h *rootedHandlers) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &dirLister{f: f}, nil
+		return &dirLister{f: f, viewInfo: func(fi os.FileInfo) os.FileInfo {
+			return h.viewInfo(path.Join(rel, fi.Name()), fi)
+		}}, nil
 	case "Stat":
-		// FSTAT: r.Filepath is where the file was opened, which may now be another file.
-		var f *os.File
-		switch hf := r.HandleFile().(type) {
-		case writableFile:
-			f = hf.File
-		case *os.File:
-			f = hf
-		}
-		if f != nil {
+		if f, ok := r.HandleFile().(interface{ Stat() (os.FileInfo, error) }); ok {
 			fi, err := f.Stat()
 			if err != nil {
 				return nil, err
@@ -376,7 +407,7 @@ func (h *rootedHandlers) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		if err != nil {
 			return nil, err
 		}
-		return listerAt{fi}, nil
+		return listerAt{h.viewInfo(rel, fi)}, nil
 	}
 	return nil, sftp.ErrSSHFxOpUnsupported
 }
@@ -391,7 +422,7 @@ func (h *rootedHandlers) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return listerAt{fi}, nil
+	return listerAt{h.viewInfo(rel, fi)}, nil
 }
 
 // Readlink implements sftp.ReadlinkFileLister.
@@ -417,12 +448,13 @@ func (h *rootedHandlers) RealPath(p string) (string, error) {
 // by the path f was opened with, which the client could have made a symlink to a folder
 // outside the root), so the entries are those of f whatever it was renamed to.
 type dirLister struct {
-	cloud bool
-	mu    sync.Mutex
-	f     *os.File
-	buf   []os.FileInfo // read, not listed yet
-	next  int64         // offset of buf[0]
-	eof   bool
+	viewInfo func(os.FileInfo) os.FileInfo
+	cloud    bool
+	mu       sync.Mutex
+	f        *os.File
+	buf      []os.FileInfo // read, not listed yet
+	next     int64         // offset of buf[0]
+	eof      bool
 }
 
 func (d *dirLister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
@@ -433,6 +465,11 @@ func (d *dirLister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	}
 	for len(d.buf) < len(ls) && !d.eof {
 		fis, err := d.f.Readdir(len(ls) - len(d.buf))
+		if d.viewInfo != nil {
+			for i := range fis {
+				fis[i] = d.viewInfo(fis[i])
+			}
+		}
 		d.buf = append(d.buf, fis...)
 		if errors.Is(err, io.EOF) {
 			d.eof = true

@@ -22,6 +22,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/clipboardfiles"
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"github.com/sylvinus/agent-vm/internal/transfermeta"
 )
 
 const clipboardWireLimit = 30 << 20
@@ -434,12 +435,18 @@ func (s *Server) clipboardArchive(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Cage-Clipboard-Status", status)
 		return
 	}
+	prepared, err := transfermeta.PrepareArchive(http.MaxBytesReader(w, r.Body, 201<<30))
+	if err != nil {
+		transferMetadataError(w, err)
+		return
+	}
+	defer prepared.Close()
 	cmd, source, err := s.clipboardCommand(ctx, "import", clipboardFileSelection{})
 	if err != nil {
 		http.Error(w, "传递剪贴板文件失败", 502)
 		return
 	}
-	cmd.Stdin = http.MaxBytesReader(w, r.Body, 201<<30)
+	cmd.Stdin = prepared.Body
 	out, err := cmd.StdoutPipe()
 	if err != nil || cmd.Start() != nil {
 		http.Error(w, "传递剪贴板文件失败", 502)
@@ -511,7 +518,17 @@ func (s *Server) clipboardCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeClipboardArchive(output io.Writer, paths []string) error {
-	return clipboardfiles.Write(output, paths)
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	done := make(chan error, 1)
+	go func() {
+		err := clipboardfiles.Write(writer, paths)
+		_ = writer.CloseWithError(err)
+		done <- err
+	}()
+	err := transfermeta.SanitizeArchive(output, reader)
+	_ = reader.CloseWithError(err)
+	return errors.Join(err, <-done)
 }
 
 func readClipboardArchive(input io.Reader) ([]string, error) {

@@ -176,7 +176,7 @@ func startProjectTransport(cmd *exec.Cmd, path string) (*projectShare, error) {
 	}
 	go func() {
 		defer close(share.done)
-		_ = reversesshfs.ServeConfined(share.transport, path, false, nil)
+		_ = reversesshfs.ServeConfined(share.transport, path, false, nil, sharedReadView)
 		share.stop()
 		_ = cmd.Wait()
 	}()
