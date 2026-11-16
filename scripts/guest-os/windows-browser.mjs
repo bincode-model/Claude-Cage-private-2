@@ -623,12 +623,18 @@ export function createNativeBrowserService(options = {}) {
       tabs.delete(id); clipboard?.detachTab(id); uploads?.cancelTab(id);
       if (active === id) invalidateCopies();
       if (vault) for (const [sid, entry] of vault.sessions) if (entry.tab === id) vault.sessions.delete(sid);
-      if (active === id) active = [...tabs.keys()].at(-1) || "";
+      const wasActive = active === id;
+      if (wasActive) {
+        const opener = [...tabs.values()].find(candidate => candidate.page === tab.opener &&
+          !candidate.page.isClosed() && candidate.page.context() === page.context());
+        active = opener?.id || [...tabs.keys()].at(-1) || "";
+      }
       if (pointer?.id === id) pointer = undefined;
       if (composition?.id === id) composition = undefined;
       if (split && [split.left, split.right].includes(id)) { split = undefined; void applyViewport(); }
       if (incognito && ![...tabs.values()].some(t => t.page.context() === page.context() && !t.page.isClosed())) { privateContexts.delete(page.context()); void page.context().close().catch(() => {}); }
       changed();
+      if (wasActive && active) void activate(active).catch(() => {});
     });
     page.on("framenavigated", frame => {
       if (frame === page.mainFrame()) {
@@ -655,6 +661,9 @@ export function createNativeBrowserService(options = {}) {
     page.on("domcontentloaded", changed);
     page.on("framedetached", frame => detachFrame(tab, frame));
     tab.ready = (async () => {
+    // Keep the originating page through navigation, including OAuth redirects
+    // that stop exposing a live window.opener to page JavaScript.
+    tab.opener = await page.opener().catch(() => null);
     // A persistent context keeps its launch viewport for newly opened pages.
     // Each tab must join the workbench's current viewport before capture starts.
     // Its context may have been created for another viewer's density.

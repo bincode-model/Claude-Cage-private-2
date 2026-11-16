@@ -83,7 +83,7 @@ jobs:
           bash scripts/package-linux.sh --skip-build
           npm test --prefix ui
           npm run --prefix ui lint
-          node --test internal/cage/browser-clipboard.test.mjs internal/cage/native-input.test.mjs internal/cage/display-density.test.mjs internal/cage/browser-wheel.test.mjs
+          node --test internal/cage/browser-clipboard.test.mjs internal/cage/browser-visibility.test.mjs internal/cage/native-input.test.mjs internal/cage/display-density.test.mjs internal/cage/browser-wheel.test.mjs
       - name: Linux executable tests as an ordinary user
         env:
           UV_CACHE_DIR: /home/cage/.cache/uv
@@ -139,6 +139,7 @@ jobs:
 
   ubuntu-browser:
     strategy:
+      fail-fast: false
       matrix:
         runner: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.runner }}
@@ -151,6 +152,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Check Snap Store retry behavior
+        run: bash tests/ubuntu-snap-retry.sh
       - name: Ubuntu Chromium stable, extensions and noVNC
         run: bash scripts/test-ubuntu-guest.sh
   package-compatibility:

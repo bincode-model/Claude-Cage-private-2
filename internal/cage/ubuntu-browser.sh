@@ -4,6 +4,28 @@ cage_is_ubuntu() (
   [ "$ID" = ubuntu ]
 )
 
+# Retry only the transient Store transport failures seen during downloads.
+# Keep each attempt on the same runner so snapd can reuse downloaded data.
+cage_snap_store_retry() (
+  local log status attempt
+  log=$(mktemp) || return $?
+  trap 'rm -f "$log"' EXIT
+  for attempt in 1 2 3; do
+    if sudo snap "$@" 2>"$log"; then
+      cat "$log" >&2
+      return 0
+    else
+      status=$?
+    fi
+    cat "$log" >&2
+    if (( attempt == 3 )) || ! LC_ALL=C grep -Eiq 'connection reset by peer|timeout awaiting response headers' "$log"; then
+      return "$status"
+    fi
+    echo "Snap Store transport error; retrying ($attempt/3)." >&2
+    sleep "$attempt"
+  done
+)
+
 cage_install_ubuntu_browser() (
   set -euo pipefail
   sudo env DEBIAN_FRONTEND=noninteractive APT_CONFIG="${CAGE_APT_CONFIG:-/dev/null}" apt-get install -y --no-install-recommends \
@@ -31,9 +53,9 @@ cage_install_ubuntu_browser() (
       echo "Installed Chromium follows $channel. Keep that installation and select latest/stable before setting up the workbench." >&2
       return 1
     fi
-    sudo snap refresh chromium
+    cage_snap_store_retry refresh chromium || return $?
   else
-    sudo snap install chromium --channel=latest/stable
+    cage_snap_store_retry install chromium --channel=latest/stable || return $?
   fi
 
   # Chrome for Testing wrote this directory in place. Do not give a browser

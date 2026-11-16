@@ -99,6 +99,60 @@ async function fixture(t, configured = {}, overrides = {}) {
   } };
 }
 
+async function waitForTabs(f, predicate) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const state = await f.call("tabs", {}, "GET");
+    if (predicate(state)) return state;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error("Popup tab state did not settle");
+}
+
+async function openPopup(f, opener) {
+  await f.call("activate", { id: opener.id });
+  const pending = opener.page.waitForEvent("popup");
+  await opener.page.evaluate(url => window.open(url, "popup", "popup,width=500,height=400"), f.url + "/popup");
+  const page = await pending;
+  const state = await waitForTabs(f, state => state.tabs.some(tab => tab.url === f.url + "/popup" && tab.id === state.active));
+  return { page, id: state.active };
+}
+
+integration("popup close returns to its opener instead of a newer unrelated tab", async t => {
+  const f = await fixture(t);
+  await f.open("/older");
+  const opener = await f.open("/opener");
+  await f.open("/newer");
+  const popup = await openPopup(f, opener);
+  t.diagnostic(`Windows controller: Chromium ${f.context().browser().version()}; Node ${process.version}; host ${process.platform}/${process.arch}`);
+  await popup.page.evaluate(() => window.close());
+  const state = await waitForTabs(f, state => !state.tabs.some(tab => tab.id === popup.id));
+  assert.equal(state.active, opener.id);
+});
+
+integration("popup close keeps the last-tab fallback when its opener has closed", async t => {
+  const f = await fixture(t);
+  await f.open("/older");
+  const opener = await f.open("/opener");
+  const unrelated = await f.open("/newer");
+  const popup = await openPopup(f, opener);
+  await opener.page.close();
+  const before = await waitForTabs(f, state => !state.tabs.some(tab => tab.id === opener.id));
+  assert.equal(before.active, popup.id);
+  await popup.page.evaluate(() => window.close());
+  const state = await waitForTabs(f, state => !state.tabs.some(tab => tab.id === popup.id));
+  assert.equal(state.active, unrelated.id);
+});
+
+integration("background popup close leaves the selected unrelated tab unchanged", async t => {
+  const f = await fixture(t);
+  const opener = await f.open("/opener");
+  const popup = await openPopup(f, opener);
+  const selected = await f.open("/selected");
+  await popup.page.evaluate(() => window.close());
+  const state = await waitForTabs(f, state => !state.tabs.some(tab => tab.id === popup.id));
+  assert.equal(state.active, selected.id);
+});
+
 integration("native new-tab pages use the configured homepage without replacing ordinary pages", async t => {
   const f = await fixture(t);
   await f.open("/retained");

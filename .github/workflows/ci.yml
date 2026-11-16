@@ -45,6 +45,44 @@ jobs:
           node scripts/guest-os/tests/browser-profile.test.mjs
           node internal/cage/device-observation.test.mjs
           node internal/cage/browser-audit.test.mjs
+  browser-popups:
+    needs: workflow-checks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install Linux isolation and display tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap xvfb
+      - name: Test real Chromium popups through the native controller
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'popup-playwright'
+          npm install --prefix $prefix --no-save --ignore-scripts playwright-core@1.65.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cli = Join-Path $prefix 'node_modules/playwright-core/cli.js'
+          if ($IsLinux) { node $cli install --with-deps chromium }
+          else { node $cli install chromium }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CAGE_BROWSER_TEST_PLAYWRIGHT = Join-Path $prefix 'node_modules/playwright-core/index.mjs'
+          $env:CAGE_BROWSER_TEST_CHROMIUM = node --input-type=module -e "import { pathToFileURL } from 'node:url'; const { chromium } = await import(pathToFileURL(process.env.CAGE_BROWSER_TEST_PLAYWRIGHT)); console.log(chromium.executablePath());"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path -LiteralPath $env:CAGE_BROWSER_TEST_CHROMIUM)) { throw 'Chromium is required; popup tests must not skip.' }
+          if ($IsLinux) {
+            xvfb-run -a node --test internal/cage/browser-popup.integration.mjs
+          } else {
+            node --test --test-name-pattern='popup close|private window popups|a login popup' scripts/guest-os/tests/windows-browser.test.mjs
+          }
+          exit $LASTEXITCODE
   macos:
     needs: workflow-checks
     uses: ./.github/workflows/macos-build.yml
