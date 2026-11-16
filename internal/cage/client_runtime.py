@@ -19,6 +19,12 @@ _remote_windows = os.name == "nt" and _context.get("CAGE_REMOTE_APP_CONTAINER") 
 PRIVATE_MODE = 0o777 if _remote_windows else 0o700
 
 
+class RuntimePathConflict(ValueError):
+    def __init__(self, alias, target):
+        super().__init__("Runtime path is already in use")
+        self.alias, self.target = alias, target
+
+
 def root():
     owner = hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16]
     temporary = Path.home() / "Temp" if _remote_windows else Path(tempfile.gettempdir())
@@ -57,7 +63,7 @@ def path(value):
         except FileExistsError:
             pass
     if alias.resolve() != target.resolve() and not (os.name == "nt" and alias.is_file() and os.path.samefile(alias, target)):
-        raise ValueError("Runtime path is already in use")
+        raise RuntimePathConflict(alias, target)
     return str(alias)
 
 
