@@ -73,7 +73,7 @@ func (s *Server) openProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请选择项目文件夹", 400)
 		return
 	}
-	if !s.op.TryLock() {
+	if !s.lockProjectOperation(r.Context()) {
 		w.Header().Set("X-Cage-Recovery", "project-operation-busy")
 		http.Error(w, "另一个操作仍在进行，请稍候", 409)
 		return

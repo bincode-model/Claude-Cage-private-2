@@ -156,7 +156,7 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请填写项目名称，并添加 1–32 个文件夹", http.StatusBadRequest)
 		return
 	}
-	if !s.op.TryLock() {
+	if !s.lockProjectOperation(r.Context()) {
 		http.Error(w, "另一个操作仍在进行，请稍候", http.StatusConflict)
 		return
 	}

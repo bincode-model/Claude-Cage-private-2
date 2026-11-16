@@ -689,14 +689,38 @@ func (s *Server) monitorNetworkTick() {
 }
 
 func (s *Server) monitorNetwork(ctx context.Context) {
+	s.runNetworkMonitor(ctx, s.monitorNetworkTick)
+}
+
+// Keep scheduling and lock ownership independent of the network probes so
+// concurrency tests can exercise the real loop without external I/O.
+func (s *Server) runNetworkMonitor(ctx context.Context, tick func()) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	skipped := 0
 	for ctx.Err() == nil {
-		if s.op.TryLock() {
+		s.mu.Lock()
+		// Publish ownership with acquisition and give project requests
+		// waiting on this round a chance before the next tick takes the lock.
+		yielded := s.projectOperationWaiters > 0
+		acquired := !yielded && s.op.TryLock()
+		if acquired {
+			s.networkMonitorDone = make(chan struct{})
+		}
+		s.mu.Unlock()
+		if acquired {
 			skipped = 0
-			s.monitorNetworkTick()
+			tick()
+			s.mu.Lock()
 			s.op.Unlock()
+			close(s.networkMonitorDone)
+			s.networkMonitorDone = nil
+			s.mu.Unlock()
+		} else if yielded {
+			skipped = 0
+			timing := s.startMonitorTiming()
+			timing.result = "project_operations_waiting"
+			s.recordMonitorTiming("network", timing)
 		} else {
 			skipped++
 			timing := s.startMonitorTiming()

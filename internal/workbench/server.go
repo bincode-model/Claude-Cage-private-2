@@ -120,6 +120,8 @@ type Server struct {
 	recovery                                         networkRecovery
 	locations                                        map[string]Location
 	monitorCancel                                    context.CancelFunc
+	networkMonitorDone                               chan struct{}
+	projectOperationWaiters                          int
 	monitorSafetyOp                                  sync.Mutex
 	safetyOp                                         sync.Mutex
 	networkPaused                                    bool
@@ -612,9 +614,7 @@ func (s *Server) handler() http.Handler {
 				return
 			}
 			ctx, cancel := context.WithCancel(r.Context())
-			if strings.HasPrefix(r.URL.Path, "/api/mobile/") || strings.HasPrefix(r.URL.Path, "/api/cli/") {
-				ctx = context.WithValue(ctx, mobileEpochKey{}, epoch)
-			}
+			ctx = context.WithValue(ctx, accountEpochKey{}, epoch)
 			stop := context.AfterFunc(epoch, cancel)
 			defer func() { stop(); cancel() }()
 			if phoneRoom != nil {
